@@ -45,8 +45,7 @@ import com.android.internal.telephony.Phone;
 import com.android.internal.telephony.RIL;
 import com.android.internal.telephony.uicc.IccCardApplicationStatus.PersoSubState;
 
-import org.codeaurora.internal.IExtTelephony;
-import org.codeaurora.internal.IDepersoResCallback;
+import com.qti.extphone.IDepersoResCallback;
 /**
  * "SIM network unlock" PIN entry screen.
  *
@@ -77,7 +76,7 @@ public class IccNetworkDepersonalizationPanel extends IccPanel {
     private static IccNetworkDepersonalizationPanel [] sNdpPanel =
             new IccNetworkDepersonalizationPanel[
                     TelephonyManager.getDefault().getSupportedModemCount()];
-    private SubscriptionInfo sir;
+    private SubscriptionInfo mSir;
 
     //UI elements
     private EditText     mPinEntry;
@@ -97,9 +96,6 @@ public class IccNetworkDepersonalizationPanel extends IccPanel {
         ERROR,
         SUCCESS
     }
-
-    private IExtTelephony mExtTelephony = IExtTelephony.Stub.
-            asInterface(ServiceManager.getService("qti.radio.extphone"));
 
     /**
      * Shows the network depersonalization dialog, but only if it is not already visible.
@@ -212,9 +208,8 @@ public class IccNetworkDepersonalizationPanel extends IccPanel {
         super(context);
         mPhone = PhoneGlobals.getPhone();
         mPersoSubtype = PersoSubState.PERSOSUBSTATE_SIM_NETWORK.ordinal();
-        sir = SubscriptionManager.from(context)
+        mSir = SubscriptionManager.from(context)
                 .getActiveSubscriptionInfoForSimSlotIndex(mPhone.getPhoneId());
-
     }
 
     //constructor
@@ -223,7 +218,7 @@ public class IccNetworkDepersonalizationPanel extends IccPanel {
         super(context);
         mPhone = phone == null ? PhoneGlobals.getPhone() : phone;
         mPersoSubtype = subtype;
-        sir = SubscriptionManager.from(context)
+        mSir = SubscriptionManager.from(context)
                 .getActiveSubscriptionInfoForSimSlotIndex(mPhone.getPhoneId());
     }
 
@@ -314,11 +309,9 @@ public class IccNetworkDepersonalizationPanel extends IccPanel {
                     mPhone.getIccCard().supplySimDepersonalization(mPersoSubState,pin,
                            Message.obtain(mHandler, EVENT_ICC_NTWRK_DEPERSONALIZATION_RESULT));
                 } else {
-                    mExtTelephony.supplyIccDepersonalization(pin, Integer.toString(persoState),
-                             mCallback, mPhone.getPhoneId());
+                    PhoneUtils.getExtTelManager().supplyIccDepersonalization(pin,
+                            Integer.toString(persoState), mCallback, mPhone.getPhoneId());
                 }
-            } catch (RemoteException ex) {
-                log("RemoteException @supplyIccDepersonalization" + ex);
             } catch (NullPointerException ex) {
                 log("NullPointerException @supplyIccDepersonalization" + ex);
             }
@@ -343,8 +336,19 @@ public class IccNetworkDepersonalizationPanel extends IccPanel {
             log ("Unsupported Perso Subtype :" + mPersoSubState.name());
             return;
         }
+        if(mSir != null) {
+            CharSequence displayName = mSir.getDisplayName();
+            log("Operator displayName is: " + displayName + "phoneId: " + mPhone.getPhoneId());
 
-       CharSequence displayName = sir.getDisplayName();
+            if(displayName != null && displayName != "") {
+                // Displaying Operator displayName  on UI
+                String phoneIdText = getContext().getString(R.string.label_phoneid)
+                        + ": " + displayName;
+                mPhoneIdText.setText(phoneIdText);
+            }
+        }
+
+       CharSequence displayName = mSir.getDisplayName();
        log("Operator displayName is: " + displayName + "phoneId: " + mPhone.getPhoneId());
 
         // Displaying Operator displayName  on UI

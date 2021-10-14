@@ -29,20 +29,21 @@ import android.os.AsyncResult;
 import android.os.Bundle;
 import android.os.PersistableBundle;
 import android.preference.Preference;
-import android.preference.PreferenceActivity;
 import android.preference.PreferenceScreen;
 import android.provider.Settings;
 import android.telecom.PhoneAccountHandle;
 import android.telecom.TelecomManager;
 import android.telephony.CarrierConfigManager;
-import android.telephony.ims.feature.ImsFeature;
 import android.telephony.SubscriptionManager;
+import android.telephony.ims.feature.ImsFeature;
+import android.telephony.ims.ImsException;
+import android.telephony.ims.ImsManager;
+import android.telephony.ims.ImsMmTelManager;
+import android.telephony.ims.feature.MmTelFeature;
 import android.telephony.TelephonyManager;
 import android.util.Log;
 import android.view.MenuItem;
 
-import com.android.ims.ImsException;
-import com.android.ims.ImsManager;
 import com.android.internal.telephony.CommandsInterface;
 import com.android.internal.telephony.Phone;
 import com.android.internal.telephony.PhoneConstants;
@@ -54,11 +55,11 @@ public class CdmaCallOptions extends TimeConsumingPreferenceActivity
                implements DialogInterface.OnClickListener,
                DialogInterface.OnCancelListener {
     private static final String LOG_TAG = "CdmaCallOptions";
-    private final boolean DBG = (PhoneGlobals.DBG_LEVEL >= 2);
 
     public static final int CALL_WAITING = 7;
     private static final String BUTTON_VP_KEY = "button_voice_privacy_key";
-    private CdmaVoicePrivacySwitchPreference mButtonVoicePrivacy;
+    private static final String CALL_FORWARDING_KEY = "call_forwarding_key";
+    private static final String CALL_WAITING_KEY = "call_waiting_key";
     public static final String CALL_FORWARD_INTENT = "org.codeaurora.settings.CDMA_CALL_FORWARDING";
     public static final String CALL_WAITING_INTENT = "org.codeaurora.settings.CDMA_CALL_WAITING";
 
@@ -98,13 +99,13 @@ public class CdmaCallOptions extends TimeConsumingPreferenceActivity
             return false;
         }
 
-        ImsManager imsMgr = ImsManager.getInstance(this, phone.getPhoneId());
+        com.android.ims.ImsManager imsMgr = com.android.ims.ImsManager.getInstance(this, phone.getPhoneId());
         try {
             if (imsMgr.getImsServiceState() != ImsFeature.STATE_READY) {
                 Log.d(LOG_TAG, "ImsServiceStatus is not ready!");
                 return false;
             }
-        } catch (ImsException ex) {
+        } catch (com.android.ims.ImsException ex) {
             Log.d(LOG_TAG, "Exception when trying to get ImsServiceStatus: " + ex);
             return false;
         }
@@ -193,6 +194,20 @@ public class CdmaCallOptions extends TimeConsumingPreferenceActivity
         return;
     }
 
+    private class UtCallback extends ImsMmTelManager.CapabilityCallback {
+        @Override
+        public void onCapabilitiesStatusChanged(MmTelFeature.MmTelCapabilities capabilities) {
+            boolean isUtAvailable = capabilities.isCapable(
+                    MmTelFeature.MmTelCapabilities.CAPABILITY_TYPE_UT);
+            updatePreferencesEnabled(isUtAvailable);
+        }
+    }
+
+    private Preference mCallForwardingPref;
+    private CdmaCallWaitingPreference mCallWaitingPref;
+    private UtCallback mUtCallback;
+    private ImsMmTelManager mMmTelManager;
+
     @Override
     protected void onCreate(Bundle icicle) {
         super.onCreate(icicle);
@@ -201,20 +216,22 @@ public class CdmaCallOptions extends TimeConsumingPreferenceActivity
 
         SubscriptionInfoHelper subInfoHelper = new SubscriptionInfoHelper(this, getIntent());
         PersistableBundle carrierConfig;
+        int subId;
         if (subInfoHelper.hasSubId()) {
-            carrierConfig = PhoneGlobals.getInstance().getCarrierConfigForSubId(
-                    subInfoHelper.getSubId());
+            subId = subInfoHelper.getSubId();
         } else {
-            carrierConfig = PhoneGlobals.getInstance().getCarrierConfig();
+            subId = SubscriptionManager.getDefaultSubscriptionId();
         }
+        carrierConfig = PhoneGlobals.getInstance().getCarrierConfigForSubId(subId);
         mCommon = carrierConfig.getBoolean("config_common_callsettings_support_bool");
         subInfoHelper.setActionBarTitle(
                 getActionBar(), getResources(),
                 mCommon ? R.string.labelCommonMore_with_label : R.string.labelCdmaMore_with_label);
 
-        mButtonVoicePrivacy = (CdmaVoicePrivacySwitchPreference) findPreference(BUTTON_VP_KEY);
+        CdmaVoicePrivacySwitchPreference buttonVoicePrivacy =
+            (CdmaVoicePrivacySwitchPreference) findPreference(BUTTON_VP_KEY);
         mPhone = subInfoHelper.getPhone();
-        mButtonVoicePrivacy.setPhone(mPhone);
+        buttonVoicePrivacy.setPhone(mPhone);
         Log.d(LOG_TAG, "sub id = " + subInfoHelper.getSubId() + " phone id = " +
                 mPhone.getPhoneId());
 
@@ -265,7 +282,7 @@ public class CdmaCallOptions extends TimeConsumingPreferenceActivity
             Log.d(LOG_TAG, "Enabled CW CF");
             mPrefCW = (PreferenceScreen) prefScreen.findPreference("button_cw_key");
 
-            ImsManager imsMgr = ImsManager.getInstance(this, mPhone.getPhoneId());
+            com.android.ims.ImsManager imsMgr = com.android.ims.ImsManager.getInstance(this, mPhone.getPhoneId());
             Boolean isEnhanced4G = imsMgr.isEnhanced4gLteModeSettingEnabledByUser();
             if (mPhone.isUtEnabled() && isEnhanced4G) {
                 mUtEnabled = mPhone.isUtEnabled();
@@ -313,6 +330,97 @@ public class CdmaCallOptions extends TimeConsumingPreferenceActivity
                             }
                         });
             }
+        }
+
+        mCallForwardingPref = getPreferenceScreen().findPreference(CALL_FORWARDING_KEY);
+        if (carrierConfig != null && carrierConfig.getBoolean(
+                CarrierConfigManager.KEY_CALL_FORWARDING_VISIBILITY_BOOL)) {
+            mCallForwardingPref.setIntent(
+                    subInfoHelper.getIntent(CdmaCallForwardOptions.class));
+        } else {
+            getPreferenceScreen().removePreference(mCallForwardingPref);
+            mCallForwardingPref = null;
+        }
+
+        mCallWaitingPref = (CdmaCallWaitingPreference) getPreferenceScreen()
+                .findPreference(CALL_WAITING_KEY);
+        if (carrierConfig == null || !carrierConfig.getBoolean(
+                CarrierConfigManager.KEY_ADDITIONAL_SETTINGS_CALL_WAITING_VISIBILITY_BOOL)) {
+            getPreferenceScreen().removePreference(mCallWaitingPref);
+            mCallWaitingPref = null;
+        }
+        // Do not go further if the preferences are removed.
+        if (mCallForwardingPref == null && mCallWaitingPref == null) return;
+
+        boolean isSsOverCdmaEnabled = carrierConfig != null && carrierConfig.getBoolean(
+                CarrierConfigManager.KEY_SUPPORT_SS_OVER_CDMA_BOOL);
+        boolean isSsOverUtEnabled = carrierConfig != null && carrierConfig.getBoolean(
+                CarrierConfigManager.KEY_CARRIER_SUPPORTS_SS_OVER_UT_BOOL);
+
+        if (isSsOverCdmaEnabled && mCallWaitingPref != null) {
+            // If SS over CDMA is enabled, then the preference will always be enabled,
+            // independent of SS over UT status. Initialize it now.
+            mCallWaitingPref.init(this, subInfoHelper.getPhone());
+            return;
+        }
+        // Since SS over UT availability can change, first disable the preferences that rely on it
+        // and only enable it if UT is available.
+        updatePreferencesEnabled(false);
+        if (isSsOverUtEnabled) {
+            // Register a callback to listen to SS over UT state. This will enable the preferences
+            // once the callback notifies settings that UT is enabled.
+            registerMmTelCapsCallback(subId);
+        } else {
+            Log.w(LOG_TAG, "SS over UT and CDMA disabled, but preferences are visible.");
+        }
+    }
+
+    @Override
+    public void onStop() {
+        super.onStop();
+        unregisterMmTelCapsCallback();
+    }
+
+    private void unregisterMmTelCapsCallback() {
+        if (mMmTelManager == null || mUtCallback == null) return;
+        mMmTelManager.unregisterMmTelCapabilityCallback(mUtCallback);
+        mUtCallback = null;
+        Log.d(LOG_TAG, "unregisterMmTelCapsCallback: UT availability callback unregistered");
+    }
+
+    private void registerMmTelCapsCallback(int subId) {
+        if (!SubscriptionManager.isValidSubscriptionId(subId)) return;
+        ImsManager imsManager = getSystemService(ImsManager.class);
+        try {
+            if (imsManager != null) {
+                mUtCallback = new UtCallback();
+                mMmTelManager = imsManager.getImsMmTelManager(subId);
+                // Callback will call back with the state as soon as it is available.
+                mMmTelManager.registerMmTelCapabilityCallback(getMainExecutor(), mUtCallback);
+                Log.d(LOG_TAG, "registerMmTelCapsCallback: UT availability callback "
+                        + "registered");
+            } else {
+                Log.w(LOG_TAG, "registerMmTelCapsCallback: couldn't get ImsManager, assuming "
+                        + "UT is not available: ");
+                updatePreferencesEnabled(false);
+            }
+        } catch (IllegalArgumentException | ImsException e) {
+            Log.w(LOG_TAG, "registerMmTelCapsCallback: couldn't register callback, assuming "
+                    + "UT is not available: " + e);
+            updatePreferencesEnabled(false);
+        }
+    }
+
+    private void updatePreferencesEnabled(boolean isEnabled) {
+        Log.d(LOG_TAG, "updatePreferencesEnabled: " + isEnabled);
+        if (mCallForwardingPref != null) mCallForwardingPref.setEnabled(isEnabled);
+
+        if (mCallWaitingPref == null || mCallWaitingPref.isEnabled() == isEnabled) return;
+        mCallWaitingPref.setActionAvailable(isEnabled);
+        if (isEnabled) {
+            SubscriptionInfoHelper subInfoHelper = new SubscriptionInfoHelper(this, getIntent());
+            // kick off the normal process to populate the Call Waiting status.
+            mCallWaitingPref.init(this, subInfoHelper.getPhone());
         }
     }
 
@@ -367,5 +475,4 @@ public class CdmaCallOptions extends TimeConsumingPreferenceActivity
         }
         return false;
     }
-
 }

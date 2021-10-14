@@ -35,8 +35,6 @@ import android.net.Uri;
 import android.os.Handler;
 import android.os.Message;
 import android.os.PersistableBundle;
-import android.os.RemoteException;
-import android.os.ServiceManager;
 import android.os.SystemClock;
 import android.os.SystemProperties;
 import android.os.UserHandle;
@@ -61,7 +59,6 @@ import android.widget.Toast;
 
 import com.android.internal.telephony.Phone;
 import com.android.internal.telephony.PhoneFactory;
-import com.android.internal.telephony.SubscriptionController;
 import com.android.internal.telephony.TelephonyCapabilities;
 import com.android.internal.telephony.util.NotificationChannelController;
 import com.android.phone.settings.VoicemailSettingsActivity;
@@ -71,8 +68,6 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
-
-import org.codeaurora.internal.IExtTelephony;
 
 /**
  * NotificationManager-related utility code for the Phone app.
@@ -285,7 +280,7 @@ public class NotificationMgr {
         Log.i(LOG_TAG, "updateMwi(): subId " + subId + " update to " + visible);
         mMwiVisible.put(subId, visible);
 
-        if (visible && isUiccCardProvisioned(subId)) {
+        if (visible) {
             if (phone == null) {
                 Log.w(LOG_TAG, "Found null phone for: " + subId);
                 return;
@@ -530,7 +525,7 @@ public class NotificationMgr {
      */
     /* package */ void updateCfi(int subId, boolean visible, boolean isRefresh) {
         logi("updateCfi: subId= " + subId + ", visible=" + (visible ? "Y" : "N"));
-        if (visible && isUiccCardProvisioned(subId)) {
+        if (visible) {
             // If Unconditional Call Forwarding (forward all calls) for VOICE
             // is enabled, just show a notification.  We'll default to expanded
             // view for now, so the there is less confusion about the icon.  If
@@ -554,7 +549,11 @@ public class NotificationMgr {
                 int slotId = SubscriptionManager.getSlotIndex(subId);
                 resId = (slotId == 0) ? R.drawable.stat_sys_phone_call_forward_sub1
                         : R.drawable.stat_sys_phone_call_forward_sub2;
-                notificationTitle = subInfo.getDisplayName().toString();
+                if (subInfo.getDisplayName() != null) {
+                    notificationTitle = subInfo.getDisplayName().toString();
+                } else {
+                    notificationTitle = mContext.getString(R.string.labelCF);
+                }
             } else {
                 notificationTitle = mContext.getString(R.string.labelCF);
             }
@@ -569,9 +568,10 @@ public class NotificationMgr {
                     .setChannelId(NotificationChannelController.CHANNEL_ID_CALL_FORWARD)
                     .setOnlyAlertOnce(isRefresh);
 
-            Intent intent = new Intent(Intent.ACTION_MAIN);
+            Intent intent = new Intent(TelecomManager.ACTION_SHOW_CALL_SETTINGS);
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-            intent.setClassName("com.android.phone", "com.android.phone.CallFeaturesSetting");
+            intent.setPackage(mContext.getResources().getString(
+                    R.string.call_settings_package_name));
             SubscriptionInfoHelper.addExtrasToIntent(
                     intent, mSubscriptionManager.getActiveSubscriptionInfo(subId));
             builder.setContentIntent(PendingIntent.getActivity(mContext, subId /* requestCode */,
@@ -960,24 +960,4 @@ public class NotificationMgr {
     private static long getTimeStamp() {
         return SystemClock.elapsedRealtime();
     }
-
-    private boolean isUiccCardProvisioned(int subId) {
-        final int PROVISIONED = 1;
-        final int INVALID_STATE = -1;
-        int provisionStatus = INVALID_STATE;
-        IExtTelephony mExtTelephony = IExtTelephony.Stub
-                .asInterface(ServiceManager.getService("qti.radio.extphone"));
-        int slotId = SubscriptionController.getInstance().getSlotIndex(subId);
-        try {
-            //get current provision state of the SIM.
-            provisionStatus = mExtTelephony.getCurrentUiccCardProvisioningStatus(slotId);
-        } catch (RemoteException ex) {
-            provisionStatus = INVALID_STATE;
-            if (DBG) log("Failed to get status for slotId: "+ slotId +" Exception: " + ex);
-        } catch (NullPointerException ex) {
-            provisionStatus = INVALID_STATE;
-            if (DBG) log("Failed to get status for slotId: "+ slotId +" Exception: " + ex);
-        }
-        return provisionStatus == PROVISIONED;
-   }
 }

@@ -42,6 +42,7 @@ import android.telecom.PhoneAccount;
 import android.telecom.PhoneAccountHandle;
 import android.telecom.VideoProfile;
 import android.telephony.CarrierConfigManager;
+import android.telephony.ims.ImsReasonInfo;
 import android.telephony.PhoneNumberUtils;
 import android.telephony.SubscriptionManager;
 import android.text.TextUtils;
@@ -56,6 +57,7 @@ import android.widget.Toast;
 
 import com.android.internal.telephony.Call;
 import com.android.internal.telephony.CallStateException;
+import com.android.internal.telephony.CommandException;
 import com.android.internal.telephony.Connection;
 import com.android.internal.telephony.IccCard;
 import com.android.internal.telephony.MmiCode;
@@ -65,6 +67,9 @@ import com.android.internal.telephony.PhoneFactory;
 import com.android.internal.telephony.TelephonyCapabilities;
 import com.android.phone.settings.SuppServicesUiUtil;
 import com.android.telephony.Rlog;
+
+import com.qti.extphone.ExtTelephonyManager;
+import com.qti.extphone.ServiceCallback;
 
 import java.io.IOException;
 import java.util.List;
@@ -97,6 +102,10 @@ public class PhoneUtils {
     /** Define for default vibrate pattern if res cannot be found */
     private static final long[] DEFAULT_VIBRATE_PATTERN = {0, 250, 250, 250};
 
+    private static final int INVALID = -1;
+    private static int mBackToBackSSFeature = INVALID;
+    private static final int BACK_BACK_SS_REQ = 1;
+
     /**
      * Theme to use for dialogs displayed by utility methods in this class. This is needed
      * because these dialogs are displayed using the application context, which does not resolve
@@ -110,6 +119,7 @@ public class PhoneUtils {
 
     /** USSD information used to aggregate all USSD messages */
     private static StringBuilder sUssdMsg = new StringBuilder();
+    private static ExtTelephonyManager mExtTelephonyManager;
 
     private static final ComponentName PSTN_CONNECTION_SERVICE_COMPONENT =
             new ComponentName("com.android.phone",
@@ -848,54 +858,6 @@ public class PhoneUtils {
         return IExtTelephony.Stub.asInterface(ServiceManager.getService("qti.radio.extphone"));
     }
 
-    public static boolean isLocalEmergencyNumber(String address) {
-        boolean result = false;
-        try {
-            result = getIExtTelephony().isLocalEmergencyNumber(address);
-        }catch (RemoteException ex) {
-            Log.e("TelephonyConnectionService", "Exception: " + ex);
-        } catch (NullPointerException ex) {
-            Log.e("TelephonyConnectionService", "Exception: " + ex);
-        }
-        return result;
-    }
-
-    public static boolean isPotentialLocalEmergencyNumber(String address) {
-        boolean result = false;
-        try {
-            result = getIExtTelephony().isPotentialLocalEmergencyNumber(address);
-        }catch (RemoteException ex) {
-            Log.e("TelephonyConnectionService", "Exception: " + ex);
-        } catch (NullPointerException ex) {
-            Log.e("TelephonyConnectionService", "Exception: " + ex);
-        }
-        return result;
-    }
-
-    public static boolean isEmergencyNumber(String address) {
-        boolean result = false;
-        try {
-            result = getIExtTelephony().isEmergencyNumber(address);
-        }catch (RemoteException ex) {
-            Log.e("TelephonyConnectionService", "Exception: " + ex);
-        } catch (NullPointerException ex) {
-            Log.e("TelephonyConnectionService", "Exception: " + ex);
-        }
-        return result;
-    }
-
-    public static boolean isDeviceInSingleStandBy() {
-        boolean result = false;
-        try {
-            result = getIExtTelephony().isDeviceInSingleStandby();
-        } catch (RemoteException ex) {
-            Log.e("TelephonyConnectionService", "Exception : " + ex);
-        } catch (NullPointerException ex) {
-            Log.e("TelephonyConnectionService", "Exception : " + ex);
-        }
-        return result;
-    }
-
     public static int getPhoneIdForECall() {
         int phoneId = 0;
         try {
@@ -925,7 +887,13 @@ public class PhoneUtils {
             // Select the phone id based on modemUuid
             // if modemUuid is 0 for any phone instance, primary stack is mapped
             // to it so return the phone id as the primary stack phone id.
-            if (Integer.parseInt(modemUuId) == PRIMARY_STACK_MODEM_ID) {
+            int modemUuIdValue = PRIMARY_STACK_MODEM_ID;
+            try {
+                modemUuIdValue = Integer.parseInt(modemUuId);
+            } catch (NumberFormatException e) {
+                Log.w(LOG_TAG, "modemUuId is not an integer: " + modemUuId);
+            }
+            if (modemUuIdValue == PRIMARY_STACK_MODEM_ID) {
                 primayStackPhoneId = phone.getPhoneId();
                 Log.d(LOG_TAG, "Primay Stack phone id: " + primayStackPhoneId + " selected");
                 break;
@@ -939,5 +907,71 @@ public class PhoneUtils {
         }
 
         return primayStackPhoneId;
+    }
+
+    public static void connectExtTelephonyManager(Context context) {
+        mExtTelephonyManager = ExtTelephonyManager.getInstance(context);
+
+        mExtTelephonyManager.connectService(mExtTelManagerServiceCallback);
+    }
+
+    public static ExtTelephonyManager getExtTelManager() {
+        return mExtTelephonyManager;
+    }
+
+    private static ServiceCallback mExtTelManagerServiceCallback = new ServiceCallback() {
+
+        @Override
+        public void onConnected() {
+            Log.d(LOG_TAG, "mExtTelManagerServiceCallback: service connected");
+        }
+
+        @Override
+        public void onDisconnected() {
+            Log.d(LOG_TAG, "mExtTelManagerServiceCallback: service disconnected");
+        }
+    };
+
+    static boolean isBacktoBackSSFeatureSupported() {
+        if (mBackToBackSSFeature == INVALID) {
+            mBackToBackSSFeature =
+                   (mExtTelephonyManager.isFeatureSupported(BACK_BACK_SS_REQ)) ? 1 : 0;
+        }
+        return (mBackToBackSSFeature == 1);
+    }
+
+    public static CommandException getCommandException(int code) {
+            CommandException.Error error = CommandException.Error.GENERIC_FAILURE;
+
+        switch(code) {
+            case ImsReasonInfo.CODE_UT_NOT_SUPPORTED:
+                error = CommandException.Error.REQUEST_NOT_SUPPORTED;
+                break;
+            case ImsReasonInfo.CODE_UT_CB_PASSWORD_MISMATCH:
+                error = CommandException.Error.PASSWORD_INCORRECT;
+                break;
+            case ImsReasonInfo.CODE_UT_SERVICE_UNAVAILABLE:
+                error = CommandException.Error.RADIO_NOT_AVAILABLE;
+                break;
+            case ImsReasonInfo.CODE_FDN_BLOCKED:
+                error = CommandException.Error.FDN_CHECK_FAILURE;
+                break;
+            case ImsReasonInfo.CODE_UT_SS_MODIFIED_TO_DIAL:
+                error = CommandException.Error.SS_MODIFIED_TO_DIAL;
+                break;
+            case ImsReasonInfo.CODE_UT_SS_MODIFIED_TO_USSD:
+                error = CommandException.Error.SS_MODIFIED_TO_USSD;
+                break;
+            case ImsReasonInfo.CODE_UT_SS_MODIFIED_TO_SS:
+                error = CommandException.Error.SS_MODIFIED_TO_SS;
+                break;
+            case ImsReasonInfo.CODE_UT_SS_MODIFIED_TO_DIAL_VIDEO:
+                error = CommandException.Error.SS_MODIFIED_TO_DIAL_VIDEO;
+                break;
+            default:
+                break;
+        }
+
+        return new CommandException(error);
     }
 }

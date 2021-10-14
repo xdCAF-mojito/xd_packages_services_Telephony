@@ -920,6 +920,16 @@ public class ImsConference extends TelephonyConferenceBase implements Holdable {
 
             mConferenceHostAddress = new Uri[hostAddresses.size()];
             mConferenceHostAddress = hostAddresses.toArray(mConferenceHostAddress);
+            Log.i(this, "setConferenceHost: temp log hosts are "
+                    + Arrays.stream(mConferenceHostAddress)
+                    .map(Uri::toString)
+                    .collect(Collectors.joining(", ")));
+
+            Log.i(this, "setConferenceHost: hosts are "
+                    + Arrays.stream(mConferenceHostAddress)
+                    .map(Uri::getSchemeSpecificPart)
+                    .map(ssp -> Rlog.pii(LOG_TAG, ssp))
+                    .collect(Collectors.joining(", ")));
 
             Log.i(this, "setConferenceHost: hosts are "
                     + Arrays.stream(mConferenceHostAddress)
@@ -1119,7 +1129,12 @@ public class ImsConference extends TelephonyConferenceBase implements Holdable {
 
             // If the conference is empty and we're supposed to do a local disconnect, do so now.
             if (mCarrierConfig.shouldLocalDisconnectEmptyConference()
-                    && oldParticipantCount > 0 && newParticipantCount == 0) {
+                    // If we dropped from > 0 participants to zero
+                    // OR if the conference had a single participant and is emulating a standalone
+                    // call.
+                    && (oldParticipantCount > 0 || !isMultiparty())
+                    // AND the CEP says there is nobody left any more.
+                    && newParticipantCount == 0) {
                 Log.i(this, "handleConferenceParticipantsUpdate: empty conference; "
                         + "local disconnect.");
                 onDisconnect();
@@ -1439,9 +1454,12 @@ public class ImsConference extends TelephonyConferenceBase implements Holdable {
             }
 
             if (mConferenceHost.getPhone().getPhoneType() == PhoneConstants.PHONE_TYPE_GSM) {
-                Log.i(this,"handleOriginalConnectionChange : SRVCC to GSM");
                 GsmConnection c = new GsmConnection(originalConnection, getTelecomCallId(),
                         mConferenceHost.getCallDirection());
+                Log.i(this, "handleOriginalConnectionChange : SRVCC to GSM."
+                        + " Created new GsmConnection with objId=" + System.identityHashCode(c)
+                        + " and originalConnection objId="
+                        + System.identityHashCode(originalConnection));
                 // This is a newly created conference connection as a result of SRVCC
                 c.setConferenceSupported(true);
                 c.setTelephonyConnectionProperties(

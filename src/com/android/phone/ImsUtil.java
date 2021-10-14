@@ -25,6 +25,8 @@ import android.util.Log;
 
 import com.android.ims.ImsConfig;
 import com.android.ims.ImsManager;
+import com.android.internal.telephony.PhoneFactory;
+import com.android.internal.telephony.imsphone.ImsPhone;
 
 public class ImsUtil {
     private static final String LOG_TAG = ImsUtil.class.getSimpleName();
@@ -114,7 +116,7 @@ public class ImsUtil {
         CarrierConfigManager cfgManager = (CarrierConfigManager) context
                 .getSystemService(Context.CARRIER_CONFIG_SERVICE);
 
-        ImsManager imsManager = ImsManager.getInstance(context, phoneId);
+        final ImsManager imsManager = ImsManager.getInstance(context, phoneId);
         if (!imsManager.isWfcEnabledByPlatform()) {
             return false;
         }
@@ -125,6 +127,13 @@ public class ImsUtil {
 
         if (cfgManager == null || !cfgManager.getConfigForSubId(getSubId(phoneId))
                 .getBoolean(CarrierConfigManager.KEY_CARRIER_PROMOTE_WFC_ON_CALL_FAIL_BOOL)) {
+            return false;
+        }
+
+        // Do not promote WFC if in roaming and WFC roaming not allowed.
+        // WFC roaming setting is not modifiable, so its value is decided by the default value
+        // chosen by the carrier, hence it really means if the carrier supports WFC roaming.
+        if (getLastKnownRoamingState(phoneId) && !imsManager.isWfcRoamingEnabledByUser()) {
             return false;
         }
 
@@ -147,5 +156,14 @@ public class ImsUtil {
             subId = subIds[0];
         }
         return subId;
+    }
+
+    private static boolean getLastKnownRoamingState(int phoneId) {
+        try {
+            ImsPhone imsPhone = (ImsPhone) (PhoneFactory.getPhone(phoneId).getImsPhone());
+            return imsPhone.getLastKnownRoamingState();
+        } catch (NullPointerException | ClassCastException e) {
+            return false;
+        }
     }
 }

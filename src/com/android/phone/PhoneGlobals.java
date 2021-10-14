@@ -50,12 +50,15 @@ import android.telephony.CarrierConfigManager;
 import android.telephony.ServiceState;
 import android.telephony.SubscriptionInfo;
 import android.telephony.SubscriptionManager;
+import android.telephony.TelephonyLocalConnection;
 import android.telephony.TelephonyManager;
 import android.telephony.data.ApnSetting;
 import android.util.LocalLog;
 import android.util.Log;
 import android.widget.Toast;
 
+import com.android.ims.ImsFeatureBinderRepository;
+import com.android.internal.os.BinderCallsStats;
 import com.android.internal.telephony.CallManager;
 import com.android.internal.telephony.IccCardConstants;
 import com.android.internal.telephony.MmiCode;
@@ -69,6 +72,10 @@ import com.android.internal.telephony.TelephonyIntents;
 import com.android.internal.telephony.dataconnection.DataConnectionReasons;
 import com.android.internal.telephony.dataconnection.DataConnectionReasons.DataDisallowedReasonType;
 import com.android.internal.telephony.ims.ImsResolver;
+import com.android.internal.telephony.imsphone.ImsPhone;
+import com.android.internal.telephony.imsphone.ImsPhoneCallTracker;
+import com.android.internal.telephony.uicc.UiccCard;
+import com.android.internal.telephony.uicc.UiccProfile;
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.phone.settings.SettingsConstants;
 import com.android.phone.vvm.CarrierVvmPackageInstalledReceiver;
@@ -152,7 +159,6 @@ public class PhoneGlobals extends ContextWrapper {
     CallNotifier notifier;
     CallerInfoCache callerInfoCache;
     NotificationMgr notificationMgr;
-    ImsResolver mImsResolver;
     TelephonyRcsService mTelephonyRcsService;
     public PhoneInterfaceManager phoneMgr;
     public ImsRcsController imsRcsController;
@@ -207,6 +213,7 @@ public class PhoneGlobals extends ContextWrapper {
             new CarrierVvmPackageInstalledReceiver();
 
     private final SettingsObserver mSettingsObserver;
+    private BinderCallsStats.SettingsObserver mBinderCallsSettingsObserver;
 
     private static class EventSimStateChangedBag {
         final int mPhoneId;
@@ -218,6 +225,53 @@ public class PhoneGlobals extends ContextWrapper {
         }
     }
 
+    // Some carrier config settings disable the network lock screen, so we call handleSimLock
+    // when either SIM_LOCK or CARRIER_CONFIG changes so that no matter which one happens first,
+    // we still do the right thing
+    private void handleSimLock(int subType, Phone phone) {
+        PersistableBundle cc = getCarrierConfigForSubId(phone.getSubId());
+        if (!CarrierConfigManager.isConfigForIdentifiedCarrier(cc)) {
+            // If we only have the default carrier config just return, to avoid popping up the
+            // the SIM lock screen when it's disabled by the carrier.
+            Log.i(LOG_TAG, "Not showing 'SIM network unlock' screen. Carrier config not loaded");
+            return;
+        }
+        if (cc.getBoolean(CarrierConfigManager.KEY_IGNORE_SIM_NETWORK_LOCKED_EVENTS_BOOL)) {
+            // Some products don't have the concept of a "SIM network lock"
+            Log.i(LOG_TAG, "Not showing 'SIM network unlock' screen. Disabled by carrier config");
+            return;
+        }
+
+        // if passed in subType is unknown, retrieve it here.
+        if (subType == -1) {
+            final UiccCard uiccCard = phone.getUiccCard();
+            if (uiccCard == null) {
+                Log.e(LOG_TAG,
+                        "handleSimLock: uiccCard for phone " + phone.getPhoneId() + " is null");
+                return;
+            }
+            final UiccProfile uiccProfile = uiccCard.getUiccProfile();
+            if (uiccProfile == null) {
+                Log.e(LOG_TAG,
+                        "handleSimLock: uiccProfile for phone " + phone.getPhoneId() + " is null");
+                return;
+            }
+            subType = uiccProfile.getApplication(
+                    uiccProfile.mCurrentAppType).getPersoSubState().ordinal();
+        }
+        // Normal case: show the "SIM network unlock" PIN entry screen.
+        // The user won't be able to do anything else until
+        // they enter a valid SIM network PIN.
+        Log.i(LOG_TAG, "show sim depersonal panel");
+        IccNetworkDepersonalizationPanel.showDialog(phone, subType);
+    }
+
+    private boolean isSimLocked(Phone phone) {
+        TelephonyManager tm = getSystemService(TelephonyManager.class);
+        return tm.createForSubscriptionId(phone.getSubId()).getSimState()
+                == TelephonyManager.SIM_STATE_NETWORK_LOCKED;
+    }
+
     Handler mHandler = new Handler() {
         @Override
         public void handleMessage(Message msg) {
@@ -227,20 +281,9 @@ public class PhoneGlobals extends ContextWrapper {
                 // TODO: This event should be handled by the lock screen, just
                 // like the "SIM missing" and "Sim locked" cases (bug 1804111).
                 case EVENT_SIM_NETWORK_LOCKED:
-                    if (getCarrierConfig().getBoolean(
-                            CarrierConfigManager.KEY_IGNORE_SIM_NETWORK_LOCKED_EVENTS_BOOL)) {
-                        // Some products don't have the concept of a "SIM network lock"
-                        Log.i(LOG_TAG, "Ignoring EVENT_SIM_NETWORK_LOCKED event; "
-                              + "not showing 'SIM network unlock' PIN entry screen");
-                    } else {
-                        // Normal case: show the "SIM network unlock" PIN entry screen.
-                        // The user won't be able to do anything else until
-                        // they enter a valid SIM network PIN.
-                        Phone phone = (Phone) ((AsyncResult) msg.obj).userObj;
-                        int subType = (Integer)((AsyncResult)msg.obj).result;
-                        Log.i(LOG_TAG, "show sim depersonal panel");
-                        IccNetworkDepersonalizationPanel.showDialog(phone, subType);
-                    }
+                    int subType = (Integer) ((AsyncResult) msg.obj).result;
+                    Phone phone = (Phone) ((AsyncResult) msg.obj).userObj;
+                    handleSimLock(subType, phone);
                     break;
                 case EVENT_DATA_ROAMING_DISCONNECTED:
                     notificationMgr.showDataRoamingNotification(msg.arg1, false);
@@ -284,7 +327,7 @@ public class PhoneGlobals extends ContextWrapper {
                             mPUKEntryProgressDialog.dismiss();
                             mPUKEntryProgressDialog = null;
                         }
-                        Log.i(LOG_TAG, "Dismissing depersonal panel");
+                        Log.i(LOG_TAG, "Dismissing depersonal panel" + (bag.mIccStatus));
                         IccNetworkDepersonalizationPanel.dialogDismiss(bag.mPhoneId);
                     }
                     break;
@@ -312,20 +355,26 @@ public class PhoneGlobals extends ContextWrapper {
                     // The voicemail number could be overridden by carrier config, so need to
                     // refresh the message waiting (voicemail) indicator.
                     refreshMwiIndicator(subId);
+                    phone = getPhone(subId);
+                    if (phone != null && isSimLocked(phone)) {
+                        // pass in subType=-1 so handleSimLock can find the actual subType if
+                        // needed. This is safe as valid values for subType are >= 0
+                        handleSimLock(-1, phone);
+                    }
                     break;
                 case EVENT_DATA_CONNECTION_ATTACHED:
-                    int subIdQ = (Integer)((AsyncResult)msg.obj).userObj;
-                    Phone phone = getPhone(subIdQ);
+                    subId = (Integer)((AsyncResult)msg.obj).userObj;
+                    phone = getPhone(subId);
                     if (phone != null) {
                         DataConnectionReasons reasons = new DataConnectionReasons();
                         boolean dataAllowed = phone.isDataAllowed(ApnSetting.TYPE_DEFAULT, reasons);
-                        if (!dataAllowed && dataIsNowRoaming(subIdQ)
-                                && subIdQ == mDefaultDataSubId) {
+                        if (!dataAllowed && dataIsNowRoaming(subId)
+                                && subId == mDefaultDataSubId) {
                             if (VDBG) Log.v(LOG_TAG, "EVENT_DATA_CONNECTION_ATTACHED");
                                 updateDataRoamingStatus();
                         }
                     } else {
-                        Log.w(LOG_TAG, "phone object is null subId: " + subIdQ);
+                        Log.w(LOG_TAG, "phone object is null subId: " + subId);
                     }
                     break;
             }
@@ -342,6 +391,9 @@ public class PhoneGlobals extends ContextWrapper {
         if (VDBG) Log.v(LOG_TAG, "onCreate()...");
 
         ContentResolver resolver = getContentResolver();
+
+        // Initialize the shim from frameworks/opt/telephony into packages/services/Telephony.
+        TelephonyLocalConnection.setInstance(new LocalConnectionImpl(this));
 
         // Cache the "voice capable" flag.
         // This flag currently comes from a resource (which is
@@ -371,9 +423,29 @@ public class PhoneGlobals extends ContextWrapper {
                         R.string.config_ims_mmtel_package);
                 String defaultImsRcsPackage = getResources().getString(
                         R.string.config_ims_rcs_package);
-                mImsResolver = new ImsResolver(this, defaultImsMmtelPackage,
-                        defaultImsRcsPackage, PhoneFactory.getPhones().length);
-                mImsResolver.initialize();
+                ImsResolver.make(this, defaultImsMmtelPackage,
+                        defaultImsRcsPackage, PhoneFactory.getPhones().length,
+                        new ImsFeatureBinderRepository());
+                ImsResolver.getInstance().initialize();
+
+                // With the IMS phone created, load static config.xml values from the phone process
+                // so that it can be provided to the ImsPhoneCallTracker.
+                for (Phone p : PhoneFactory.getPhones()) {
+                    Phone imsPhone = p.getImsPhone();
+                    if (imsPhone != null && imsPhone instanceof ImsPhone) {
+                        ImsPhone theImsPhone = (ImsPhone) imsPhone;
+                        if (theImsPhone.getCallTracker() instanceof ImsPhoneCallTracker) {
+                            ImsPhoneCallTracker ict = (ImsPhoneCallTracker)
+                                    theImsPhone.getCallTracker();
+
+                            ImsPhoneCallTracker.Config config = new ImsPhoneCallTracker.Config();
+                            config.isD2DCommunicationSupported = getResources().getBoolean(
+                                    R.bool.config_use_device_to_device_communication);
+                            ict.setConfig(config);
+                        }
+                    }
+                }
+                RcsProvisioningMonitor.make(this);
             }
 
             // Start TelephonyDebugService After the default phone is created.
@@ -476,6 +548,15 @@ public class PhoneGlobals extends ContextWrapper {
                     SettingsConstants.HAC_KEY + "=" + (hac == SettingsConstants.HAC_ENABLED
                             ? SettingsConstants.HAC_VAL_ON : SettingsConstants.HAC_VAL_OFF));
         }
+
+        // Start tracking Binder latency for the phone process.
+        mBinderCallsSettingsObserver = new BinderCallsStats.SettingsObserver(
+            getApplicationContext(),
+            new BinderCallsStats(
+                    new BinderCallsStats.Injector(),
+                    com.android.internal.os.BinderLatencyProto.Dims.TELEPHONY));
+
+        PhoneUtils.connectExtTelephonyManager(this);
     }
 
     /**
@@ -499,10 +580,6 @@ public class PhoneGlobals extends ContextWrapper {
 
     public static Phone getPhone(int subId) {
         return PhoneFactory.getPhone(SubscriptionManager.getPhoneId(subId));
-    }
-
-    public ImsResolver getImsResolver() {
-        return mImsResolver;
     }
 
     /* package */ CallManager getCallManager() {
@@ -947,6 +1024,23 @@ public class PhoneGlobals extends ContextWrapper {
     }
 
     /**
+     * @return whether the device supports RCS User Capability Exchange or not.
+     */
+    public boolean getDeviceUceEnabled() {
+        return (mTelephonyRcsService == null) ? false : mTelephonyRcsService.isDeviceUceEnabled();
+    }
+
+    /**
+     * Set the device supports RCS User Capability Exchange.
+     * @param isEnabled true if the device supports UCE.
+     */
+    public void setDeviceUceEnabled(boolean isEnabled) {
+        if (mTelephonyRcsService != null) {
+            mTelephonyRcsService.setDeviceUceEnabled(isEnabled);
+        }
+    }
+
+    /**
      * Dump the state of the object, add calls to other objects as desired.
      *
      * @param fd File descriptor
@@ -967,7 +1061,7 @@ public class PhoneGlobals extends ContextWrapper {
         pw.println("ImsResolver:");
         pw.increaseIndent();
         try {
-            if (mImsResolver != null) mImsResolver.dump(fd, pw, args);
+            if (ImsResolver.getInstance() != null) ImsResolver.getInstance().dump(fd, pw, args);
         } catch (Exception e) {
             e.printStackTrace();
         }
